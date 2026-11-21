@@ -97,7 +97,20 @@ touch "$mnt/.probe.for.growfs"
 rm -f "$mnt/tmp/oic-update.sh" "$mnt/tmp/oic-config.php" "$mnt/etc/resolv.conf"
 rm -rf "$mnt/var/cache/pkg/"* "$mnt/var/db/pkg/repos/"* "$mnt/tmp/"* "$mnt/var/tmp/"*
 rm -f "$mnt"/etc/ssh/ssh_host_* "$mnt/etc/hostid" "$mnt/root/.history"
-umount "$mnt/dev"
+# Package scripts may have left daemons running in the chroot (configd):
+# stop whatever still holds files in the image before unmounting it.
+stop_chroot_procs() {
+  for pid in $(fstat -f "$mnt" 2>/dev/null | awk 'NR > 1 { print $3 }' | sort -u); do
+    echo "[build] stopping $(ps -o comm= -p "$pid" 2>/dev/null) (pid $pid) left in the chroot"
+    kill "$pid" 2>/dev/null
+  done
+  sleep 2
+  for pid in $(fstat -f "$mnt" 2>/dev/null | awk 'NR > 1 { print $3 }' | sort -u); do
+    kill -9 "$pid" 2>/dev/null
+  done
+}
+stop_chroot_procs
+umount "$mnt/dev" || { stop_chroot_procs; umount -f "$mnt/dev"; }
 umount "$mnt"
 mdconfig -d -u "$md"; md=""
 
