@@ -1,0 +1,6 @@
+#!/bin/sh
+# openimages.cloud: apply the instance metadata (SSH keys, hostname, web GUI
+# password) once per instance, after OPNsense brought the network up.
+/usr/local/bin/php /usr/local/opnsense/scripts/oic/firstboot.php || \
+  echo "openimages.cloud: first-boot configuration failed, see /var/log/oic-firstboot.log"
+exit 0

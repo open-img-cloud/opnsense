@@ -1,0 +1,41 @@
+name: Boot test (KVM)
+
+# Boots the image built by a release.yml run (publish=false) under KVM in the
+# three metadata scenarios of tests/run.sh.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'release.yml run whose image to test'
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [configdrive, nocloud, metadata]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          name=$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}/artifacts" \
+            -q '[.artifacts[] | select(.name | startswith("freebsd-image-") | not) | select(.name | startswith("opnsense"))][0].name')
+          echo "artifact: $name"
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "$name" -D art
+          ls -l art
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86 qemu-utils genisoimage socat jq
+          sudo chmod 0666 /dev/kvm
+      - name: Boot and check (${{ matrix.scenario }})
+        run: tests/run.sh "$(ls $PWD/art/*.qcow2)" ${{ matrix.scenario }}

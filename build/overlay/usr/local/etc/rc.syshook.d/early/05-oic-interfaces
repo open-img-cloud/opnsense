@@ -1,0 +1,5 @@
+#!/bin/sh
+# openimages.cloud: match the WAN and LAN of config.xml to the NICs of this
+# instance before OPNsense configures the system, so it never stops at the
+# interactive interface assignment (unattended cloud boot).
+exec /usr/local/bin/php /usr/local/opnsense/scripts/oic/interfaces.php
