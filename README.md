@@ -127,6 +127,41 @@ Change it after the first login (*System: Access: Users*).
 
 Open `https://<WAN address>/` (self-signed certificate) and log in as `root`.
 
+## Network performance on virtio-net
+
+OPNsense is FreeBSD, and FreeBSD on virtio-net (`vtnet`) is slower than Linux, mostly when
+receiving. Size the instance with that in mind. Measured on Infomaniak public cloud
+(2 vCPU flavor, iperf3, November 2026, OPNsense 26.7, Debian 13 VMs at both ends):
+
+| Mbit/s, 4 streams | LAN to WAN | WAN to LAN |
+|---|---|---|
+| Linux VM to Linux VM, no firewall (the cloud's ceiling for this flavor) | 2290 | 2280 |
+| Routed and NATed by OPNsense, offloads off (image default) | 690 to 1130 | 720 to 1720 |
+| Same, offloads on, client on another hypervisor host | 1150 to 1340 | 690 to 1700 |
+| Same, offloads on, client on the **same** hypervisor host as OPNsense | **580** | **380** |
+
+Figures vary with the hypervisor host from one run to the next. What follows from them:
+
+- **Leave the offloads off** (*Interfaces: Settings*: hardware CRC, TSO and LRO disabled,
+  the OPNsense default and this image's). Turning checksum and TSO on does not speed up
+  routing to other hosts, and **halves** it when the LAN clients run on the same hypervisor
+  host as OPNsense, which is common in a cloud. This is a known FreeBSD issue with checksum
+  offload on virtio-net when forwarding
+  ([FreeBSD bug 165059](https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=165059),
+  [OPNsense forum](https://forum.opnsense.org/index.php?topic=45870.0)); on some KVM clouds
+  it breaks forwarding entirely.
+- The offloads only help traffic that ends on the firewall itself (VPN termination, proxy,
+  web interface): 1.3 to 1.4 instead of 0.6 to 0.7 Gbit/s here (4 streams sent). Turn them on only if that is your
+  main use and your LAN clients never share a host with OPNsense.
+- **Keep multiqueue on** (`hw_vif_multiqueue_enabled=true`, in the catalog properties):
+  FreeBSD then uses one queue pair per vCPU. More vCPUs raise the routed throughput with
+  several flows, not with a single one.
+- Packet filtering itself is not the bottleneck: disabling pf changes nothing.
+
+The measurement is reproducible with [`tests/throughput.sh`](tests/throughput.sh)
+(workflow *Throughput (Infomaniak)*; `scope=opnsense` forces the same-host case with an
+affinity server group).
+
 ## What this image contains
 
 [`build/build.sh`](build/build.sh) runs on a dedicated FreeBSD runner. OPNsense itself is not
@@ -140,9 +175,8 @@ modified:
   disk instead of memory, no initial wizard (it would reassign the interfaces), WAN without
   the private and bogon network blocks (in a cloud the WAN is on a private tenant network),
   rules on the WAN for the web interface, SSH and ping to the firewall, DNS rebinding and
-  HTTP referer checks off (access through a floating IP or NAT), SSH with keys only,
-  checksum and TSO offloads on (OPNsense ships them off, which halves the routed throughput
-  on virtio-net), LRO off as advised for a router;
+  HTTP referer checks off (access through a floating IP or NAT), SSH with keys only;
+  the NIC offloads stay off as OPNsense ships them ([below](#network-performance-on-virtio-net));
 - the public default password never works: the root password is random until the first-boot
   layer sets it;
 - the first-boot layer ([`build/overlay`](build/overlay)): at every boot, before OPNsense

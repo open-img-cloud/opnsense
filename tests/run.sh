@@ -88,9 +88,6 @@ if (( up )); then
   root_gb=$(( $(R "df -k / | awk 'NR==2 {print \$2}'") / 1024 / 1024 ))
   (( root_gb >= 10 )) && ok "root filesystem grown (${root_gb} GB of 12)" || ko "root filesystem not grown (${root_gb} GB)"
   R 'mount | grep -q " /var (tmpfs\|mfs" ' && ko "/var still in memory" || ok "/var on disk"
-  opts=$(R "ifconfig vtnet0 | sed -n 's/.*options=[0-9a-f]*<\\(.*\\)>.*/\\1/p'")
-  [[ ",$opts," == *",TXCSUM,"* && ",$opts," == *",TSO4,"* && ",$opts," != *",LRO,"* ]] \
-    && ok "vtnet0 offloads: checksum and TSO on, LRO off" || ko "vtnet0 offloads not as expected: $opts"
   qga=$( (printf '{"execute":"guest-ping"}\n'; sleep 2) | timeout 10 socat -t 4 - UNIX-CONNECT:"$W/qga.sock")
   [[ "$qga" == *return* ]] && ok "qemu-guest-agent answers" || ko "qemu-guest-agent silent"
   methods=$( { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=none -p 2222 nobody@127.0.0.1 true 2>&1 || true; } | sed -n 's/.*Permission denied (\(.*\)).*/\1/p')
