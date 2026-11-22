@@ -11,6 +11,11 @@
 #   opn   OPNsense: WAN on the public network, LAN on a private 192.168.1.0/24
 #   lan   Debian 13 on that LAN only (static address from the config drive):
 #         its traffic is routed and NATed by opn; driven over SSH through opn
+# SCOPE=opnsense (default all) only boots srv, opn, lan and srvh: OPNsense,
+# the LAN client and srvh (a second server) share one hypervisor host
+# (affinity server group), the case where checksum offload is known to break
+# forwarding on vtnet (FreeBSD PR 165059). OPN_IMAGE_FILE=<qcow2> tests a
+# local OPNsense build instead of the published one.
 # Each case is iperf3 against srv for 10 s: 1 and 4 streams, upload and
 # download (-R). Results go to $GITHUB_STEP_SUMMARY when set.
 set -uo pipefail
@@ -24,17 +29,19 @@ W=$(mktemp -d)
 SUM=${GITHUB_STEP_SUMMARY:-/dev/stdout}
 O=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR -o BatchMode=yes -i "$W/id")
 LANIP=192.168.1.50
+SCOPE=${SCOPE:-all}
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
 cleanup() {
   set +e
   log "cleanup"
-  for s in srv deb bsd opn lan; do openstack server delete --wait "$T-$s" 2>/dev/null; done
+  for s in srv srvh deb bsd opn lan; do openstack server delete --wait "$T-$s" 2>/dev/null; done
   for p in opn-lan lan; do openstack port delete "$T-$p" 2>/dev/null; done
   openstack subnet delete "$T-lan" 2>/dev/null
   openstack network delete "$T-lan" 2>/dev/null
   for i in debian bsd opn; do openstack image delete "$T-$i" 2>/dev/null; done
   openstack keypair delete "$T" 2>/dev/null
+  openstack server group delete "$T" 2>/dev/null
   openstack security group delete "$T" 2>/dev/null
   rm -rf "$W"
 }
@@ -62,8 +69,15 @@ image() { # <catalog id> <glance name>
   rm -f "$W/$f"
 }
 image debian-13 "$T-debian"
-image freebsd-15 "$T-bsd"
-image opnsense "$T-opn"
+[[ $SCOPE == all ]] && image freebsd-15 "$T-bsd"
+if [[ -n "${OPN_IMAGE_FILE:-}" ]]; then
+  log "image opnsense from $OPN_IMAGE_FILE (unpublished build)"
+  echo "opnsense $(basename "$OPN_IMAGE_FILE") (unpublished build)" >> "$W/versions"
+  openstack image create --disk-format qcow2 --container-format bare --file "$OPN_IMAGE_FILE" \
+    --property hw_qemu_guest_agent=yes --property hw_vif_multiqueue_enabled=true "$T-opn" >/dev/null
+else
+  image opnsense "$T-opn"
+fi
 
 # --- LAN behind OPNsense -------------------------------------------------------
 # No Neutron DHCP: the client takes its static address from the config drive,
@@ -93,11 +107,15 @@ boot() { # <name> <image> [extra args]
     && log "boot $n" || log "boot $n FAILED"
 }
 boot srv debian --network "$EXTNET" --security-group "$T" --user-data "$W/srv.yaml"
-boot deb debian --network "$EXTNET" --security-group "$T" --user-data "$W/client.yaml"
-boot bsd bsd --network "$EXTNET" --security-group "$T"
-boot opn opn --nic net-id="$(openstack network show -f value -c id "$EXTNET")" \
+if [[ $SCOPE == all ]]; then
+  boot deb debian --network "$EXTNET" --security-group "$T" --user-data "$W/client.yaml"
+  boot bsd bsd --network "$EXTNET" --security-group "$T"
+fi
+AFF=$(openstack server group create --policy affinity -f value -c id "$T")
+boot srvh debian --network "$EXTNET" --security-group "$T" --user-data "$W/srv.yaml" --hint group="$AFF"
+boot opn opn --hint group="$AFF" --nic net-id="$(openstack network show -f value -c id "$EXTNET")" \
   --nic port-id="$(openstack port show -f value -c id "$T-opn-lan")" --security-group "$T"
-boot lan debian --nic port-id="$(openstack port show -f value -c id "$T-lan")" \
+boot lan debian --hint group="$AFF" --nic port-id="$(openstack port show -f value -c id "$T-lan")" \
   --config-drive true --user-data "$W/client.yaml"
 
 ip4() { openstack server show -f json -c addresses "$1" | jq -r '[.addresses[][]] | map(select(test("^[0-9.]+$")))[0]'; }
@@ -108,11 +126,18 @@ waitssh() { # <user@ip>
 for _ in $(seq 1 60); do
   [[ "$(openstack server list --name "^$T-" -f value -c Status | sort -u)" == ACTIVE ]] && break; sleep 5
 done
-SRV=$(ip4 "$T-srv"); DEB=$(ip4 "$T-deb"); BSD=$(ip4 "$T-bsd"); OPN=$(ip4 "$T-opn")
-log "srv $SRV deb $DEB bsd $BSD opn $OPN lan $LANIP"
+SRV=$(ip4 "$T-srv"); SRVH=$(ip4 "$T-srvh"); OPN=$(ip4 "$T-opn")
+[[ $SCOPE == all ]] && { DEB=$(ip4 "$T-deb"); BSD=$(ip4 "$T-bsd"); }
+log "srv $SRV srvh $SRVH deb ${DEB:-} bsd ${BSD:-} opn $OPN lan $LANIP"
+# hypervisor placement (hashed host ids): srvh, opn and lan must share one
+{ echo "## Placement (hostId)"
+  for n in srv srvh opn lan; do echo "$n $(openstack server show -f value -c hostId "$T-$n" | cut -c1-12)"; done
+} >> "$W/state"
 
-waitssh "debian@$SRV" || log "srv: no SSH"
-for _ in $(seq 1 30); do ssh "${O[@]}" "debian@$SRV" 'pgrep -x iperf3' </dev/null >/dev/null 2>&1 && break; sleep 10; done
+for h in "$SRV" "$SRVH"; do
+  waitssh "debian@$h" || log "$h: no SSH"
+  for _ in $(seq 1 30); do ssh "${O[@]}" "debian@$h" 'pgrep -x iperf3' </dev/null >/dev/null 2>&1 && break; sleep 10; done
+done
 
 # --- helpers -------------------------------------------------------------------
 # on <target> <script>: run a POSIX sh script on a client (root's login shell
@@ -129,7 +154,7 @@ LANEOF"; }
 cases() {
   local label=$1 fn=$2 a r
   for a in "-P 1" "-P 4" "-P 1 -R" "-P 4 -R"; do
-    r=$($fn "iperf3 -c $SRV -t $DUR $a -J" 2>/dev/null \
+    r=$($fn "iperf3 -c ${TGT:-$SRV} -t $DUR $a -J" 2>/dev/null \
       | jq -r '(.end.sum_received.bits_per_second // 0) / 1e6 | floor' 2>/dev/null)
     [[ "$r" =~ ^[1-9][0-9]*$ ]] || r=fail
     echo "$label|$a|$r" >> "$W/results"
@@ -148,13 +173,13 @@ OFF6="-rxcsum -txcsum -tso -lro -rxcsum6 -txcsum6"
 ON6="rxcsum txcsum tso lro rxcsum6 txcsum6"
 
 # --- Debian baseline -------------------------------------------------------------
-if waitssh "debian@$DEB"; then
+if [[ $SCOPE == all ]] && waitssh "debian@$DEB"; then
   for _ in $(seq 1 30); do on "debian@$DEB" 'command -v iperf3' >/dev/null 2>&1 && break; sleep 10; done
   cases "Debian 13" run_deb
-else log "deb: no SSH"; fi
+fi
 
 # --- FreeBSD 15: as shipped, LRO off, all offloads off ------------------------------
-if waitssh "freebsd@$BSD"; then
+if [[ $SCOPE == all ]] && waitssh "freebsd@$BSD"; then
   on "freebsd@$BSD" 'sudo env ASSUME_ALWAYS_YES=yes pkg install -y iperf3' >/dev/null 2>&1
   vtnet "FreeBSD 15 as shipped" "freebsd@$BSD" vtnet0
   cases "FreeBSD 15 as shipped" run_bsd
@@ -162,7 +187,7 @@ if waitssh "freebsd@$BSD"; then
   cases "FreeBSD 15, LRO off" run_bsd
   on "freebsd@$BSD" "sudo ifconfig vtnet0 $OFF6; sleep 2"
   cases "FreeBSD 15, all offloads off" run_bsd
-else log "bsd: no SSH"; fi
+fi
 
 # --- OPNsense: host, then routed for the LAN client -------------------------------
 if waitssh "root@$OPN"; then
@@ -184,18 +209,20 @@ KEY"
     } >> "$W/state"
   fi
 
-  cases "OPNsense host, as shipped (offloads off)" run_opn
-  [[ $lan_ok == yes ]] && cases "Through OPNsense, as shipped (offloads off)" run_lan
-  on "root@$OPN" "ifconfig vtnet0 $ON6; ifconfig vtnet1 $ON6; sleep 3"
-  vtnet "OPNsense with offloads on" "root@$OPN" "vtnet0 vtnet1"
-  cases "OPNsense host, offloads on" run_opn
-  [[ $lan_ok == yes ]] && cases "Through OPNsense, offloads on" run_lan
-  on "root@$OPN" "ifconfig vtnet0 -lro; ifconfig vtnet1 -lro; sleep 3"
-  cases "OPNsense host, offloads on except LRO" run_opn
-  [[ $lan_ok == yes ]] && cases "Through OPNsense, offloads on except LRO" run_lan
-  on "root@$OPN" "ifconfig vtnet0 $OFF6; ifconfig vtnet1 $OFF6; pfctl -d; sleep 3"
-  cases "OPNsense host, offloads off, pf disabled" run_opn
-  # pf stays disabled: re-enabling it would drop this session's state; the VM is deleted next
+  # As built: the image under test decides the offloads. Then all offloads off.
+  # Routed cases to srv (anywhere) and to srvh (same hypervisor host as OPNsense
+  # and the LAN client: the PR 165059 case).
+  for mode in "as built" "offloads off"; do
+    if [[ $mode == "offloads off" ]]; then
+      on "root@$OPN" "ifconfig vtnet0 $OFF6; ifconfig vtnet1 $OFF6; sleep 3"
+    fi
+    vtnet "OPNsense, $mode" "root@$OPN" "vtnet0 vtnet1"
+    cases "OPNsense host, $mode" run_opn
+    if [[ $lan_ok == yes ]]; then
+      cases "Through OPNsense, $mode, to another host" run_lan
+      TGT=$SRVH cases "Through OPNsense, $mode, same host" run_lan
+    fi
+  done
 else log "opn: no SSH"; fi
 
 # --- report --------------------------------------------------------------------
