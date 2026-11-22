@@ -50,6 +50,7 @@ jobs:
       # Dedicated FreeBSD runner (runner group freebsd-builder).
       build_runner: '["self-hosted","freebsd","amd64"]'
       runtime_smoke_login_user: root
+      runtime_smoke_contract: appliance
       publish: ${{ inputs.publish == true }}
       sync_latest: true
     secrets: inherit
