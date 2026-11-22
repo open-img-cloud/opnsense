@@ -1,0 +1,37 @@
+name: Throughput (Infomaniak)
+
+# Manual: iperf3 throughput of the published Debian 13, FreeBSD 15 and
+# OPNsense images on Infomaniak (virtio-net), host and routed through
+# OPNsense. See tests/throughput.sh.
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: 'Infomaniak region'
+        default: 'dc3-a'
+      flavor:
+        description: 'Flavor of every VM'
+        default: 'a2-ram4-disk20-perf1'
+
+permissions:
+  contents: read
+
+jobs:
+  iperf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: OpenStack client
+        run: pip install -q python-openstackclient
+      - name: Measure
+        env:
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_REGION_NAME: ${{ inputs.region }}
+          OS_AUTH_TYPE: v3applicationcredential
+          OS_APPLICATION_CREDENTIAL_ID: ${{ secrets.OS_APPLICATION_CREDENTIAL_ID }}
+          OS_APPLICATION_CREDENTIAL_SECRET: ${{ secrets.OS_APPLICATION_CREDENTIAL_SECRET }}
+          OS_IDENTITY_API_VERSION: '3'
+          OS_INTERFACE: public
+          FLAVOR: ${{ inputs.flavor }}
+        run: tests/throughput.sh
