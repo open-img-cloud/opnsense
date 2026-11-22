@@ -34,6 +34,9 @@ const OIC_DONE = '/conf/oic-instance-id';
 const OIC_UNSET = '/conf/oic-password-unset';
 const OIC_MD = 'http://169.254.169.254';
 
+/* OPNsense ships OpenSSH and OpenSSL from ports (/usr/local), not from base */
+putenv('PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin');
+
 function logm(string $msg): void
 {
     @file_put_contents(OIC_LOG, gmdate('Y-m-d\TH:i:s\Z') . " $msg\n", FILE_APPEND);
@@ -60,7 +63,7 @@ function md_get(string $path, int $tries): ?string
     for ($i = 0; $i < $tries; $i++) {
         $tmp = tempnam('/tmp', 'oic');
         $code = '';
-        run(sprintf('/usr/local/bin/curl -sS -m 5 -o %s -w "%%{http_code}" %s', escapeshellarg($tmp), escapeshellarg(OIC_MD . $path)), $code);
+        run(sprintf('curl -sS -m 5 -o %s -w "%%{http_code}" %s', escapeshellarg($tmp), escapeshellarg(OIC_MD . $path)), $code);
         $body = (string)@file_get_contents($tmp);
         @unlink($tmp);
         if ($code === '200') {
@@ -165,16 +168,16 @@ function nova_store_password(string $password, array $keys): string
     mkdir($dir, 0700);
     file_put_contents("$dir/key.pub", $rsa . "\n");
     file_put_contents("$dir/pw", $password);
-    $ok = run("/usr/bin/ssh-keygen -e -m PKCS8 -f $dir/key.pub > $dir/key.pem")
-        && run("/usr/local/bin/openssl pkeyutl -encrypt -pubin -inkey $dir/key.pem -in $dir/pw | /usr/local/bin/openssl base64 -A > $dir/pw.enc");
+    $ok = run("ssh-keygen -e -m PKCS8 -f $dir/key.pub > $dir/key.pem")
+        && run("openssl pkeyutl -encrypt -pubin -inkey $dir/key.pem -in $dir/pw | openssl base64 -A > $dir/pw.enc");
     $code = '';
     if ($ok) {
-        run(sprintf('/usr/local/bin/curl -sS -m 10 -o /dev/null -w "%%{http_code}" -X POST --data-binary @%s %s',
+        run(sprintf('curl -sS -m 10 -o /dev/null -w "%%{http_code}" -X POST --data-binary @%s %s',
             "$dir/pw.enc", escapeshellarg(OIC_MD . '/openstack/latest/password')), $code);
     }
     run('/bin/rm -rf ' . escapeshellarg($dir));
     if (!$ok) {
-        return 'failed (could not encrypt with the RSA key)';
+        return 'failed (could not encrypt with the RSA key: ssh-keygen or openssl failed)';
     }
     return $code === '200' ? 'stored for nova get-password' : "not stored (metadata service answered $code)";
 }
