@@ -134,6 +134,28 @@ foreach ([['TCP', '443', 'web GUI', 'inet46'], ['TCP', '22', 'SSH', 'inet46'], [
 $opn = node($xp, '/opnsense/OPNsense');
 xml_fragment($doc, $opn, '<QemuGuestAgent version="1.0.0"><general><Enabled>1</Enabled><LogDebug>0</LogDebug><DisabledRPCs/></general></QemuGuestAgent>');
 
+/*
+ * NIC offloads (Interfaces: Settings). OPNsense ships them all disabled; on
+ * virtio-net (vtnet) that halves the routed throughput (Infomaniak, 2 vCPU,
+ * LAN to WAN with NAT, 4 streams: 689 Mbit/s disabled, 1336 with checksum
+ * and TSO enabled). LRO stays disabled, as advised for a router.
+ * The model node exists once the update ran its migrations; created with its
+ * version otherwise, so the migration does not overwrite it.
+ */
+$found = $xp->query('/opnsense/OPNsense/Interfaces/settings');
+if ($found->length === 1) {
+    $ifs = $found->item(0);
+} else {
+    $ifs = child($doc, child($doc, $opn, 'Interfaces'), 'settings');
+    $ifs->setAttribute('version', '1.0.0');
+}
+child($doc, $ifs, 'disablechecksumoffloading', '0');
+child($doc, $ifs, 'disablesegmentationoffloading', '0');
+child($doc, $ifs, 'disablelargereceiveoffloading', '1');
+drop($xp, '/opnsense/system/disablechecksumoffloading');
+drop($xp, '/opnsense/system/disablesegmentationoffloading');
+drop($xp, '/opnsense/system/disablelargereceiveoffloading');
+
 @mkdir('/conf', 0755);
 if ($doc->save($dst) === false) {
     fwrite(STDERR, "cannot write $dst\n");

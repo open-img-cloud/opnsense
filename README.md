@@ -140,7 +140,9 @@ modified:
   disk instead of memory, no initial wizard (it would reassign the interfaces), WAN without
   the private and bogon network blocks (in a cloud the WAN is on a private tenant network),
   rules on the WAN for the web interface, SSH and ping to the firewall, DNS rebinding and
-  HTTP referer checks off (access through a floating IP or NAT), SSH with keys only;
+  HTTP referer checks off (access through a floating IP or NAT), SSH with keys only,
+  checksum and TSO offloads on (OPNsense ships them off, which halves the routed throughput
+  on virtio-net), LRO off as advised for a router;
 - the public default password never works: the root password is random until the first-boot
   layer sets it;
 - the first-boot layer ([`build/overlay`](build/overlay)): at every boot, before OPNsense

@@ -168,7 +168,7 @@ else log "bsd: no SSH"; fi
 if waitssh "root@$OPN"; then
   on "root@$OPN" 'env ASSUME_ALWAYS_YES=yes pkg install -y iperf3' >/dev/null 2>&1
   { echo "## OPNsense offload settings (config.xml)"
-    on "root@$OPN" 'php -r '\''require_once "config.inc"; foreach (["disablechecksumoffloading","disablesegmentationoffloading","disablelargereceiveoffloading"] as $k) echo "$k=", ($config["system"][$k] ?? "unset"), "\n";'\'''
+    on "root@$OPN" 'php -r '\''require_once "config.inc"; foreach (["disablechecksumoffloading","disablesegmentationoffloading","disablelargereceiveoffloading"] as $k) echo "$k=", ($config["OPNsense"]["Interfaces"]["settings"][$k] ?? "default (1)"), "\n";'\'''
   } >> "$W/state" 2>&1
   vtnet "OPNsense as shipped" "root@$OPN" "vtnet0 vtnet1"
   # key for the LAN hop
