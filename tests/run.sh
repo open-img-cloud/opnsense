@@ -35,7 +35,9 @@ esac
 
 qemu-img create -q -f qcow2 -F qcow2 -b "$img" "$W/disk.qcow2" 12G
 net0="user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8443-:443"
-[[ $sc == metadata ]] && net0+=",guestfwd=tcp:169.254.169.254:80-cmd:env MD_DIR=$W/md python3 $PWD/tests/md_stdio.py"
+# slirp only forwards addresses inside its own network: put the WAN in
+# 169.254.169.0/24 so 169.254.169.254 can reach the metadata emulator.
+[[ $sc == metadata ]] && net0+=",net=169.254.169.0/24,host=169.254.169.2,dns=169.254.169.3,dhcpstart=169.254.169.15,guestfwd=tcp:169.254.169.254:80-cmd:env MD_DIR=$W/md python3 $PWD/tests/md_stdio.py"
 nets=(-netdev "$net0" -device virtio-net-pci,netdev=n0)
 [[ $sc == metadata ]] && nets+=(-netdev user,id=n1,net=10.9.0.0/24 -device virtio-net-pci,netdev=n1)
 qemu-system-x86_64 -accel kvm -cpu host -smp 2 -m 2048 -nographic \
