@@ -73,6 +73,8 @@ if (( up )); then
     grep -q "$pw_plain" "$W/console.log" && ko "user-data password printed on the console" || ok "user-data password not printed on the console"
   else
     [[ -n "$want" ]] && ok "generated password on the serial console" || ko "no generated password on the console"
+    # stored by a detached retry loop: give it a moment
+    for _ in $(seq 1 12); do [[ -s "$W/md/password" ]] && break; sleep 5; done
     if [[ -s "$W/md/password" ]]; then
       dec=$(openssl base64 -d -A < "$W/md/password" | openssl pkeyutl -decrypt -inkey "$W/key" 2>/dev/null)
       [[ "$dec" == "$want" ]] && ok "password stored for nova get-password decrypts to the console one" || ko "nova password does not decrypt to the console one"

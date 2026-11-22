@@ -16,8 +16,8 @@
  *          it); never printed anywhere;
  *       b. otherwise, on the first instance only, a generated 24-character
  *          password, always written to the serial console and, when the
- *          metadata service is reachable and the key is RSA, stored
- *          encrypted for `nova get-password`;
+ *          key is RSA (OpenStack), stored encrypted for `nova get-password`
+ *          by a detached retry loop (nova-password.sh);
  *       c. always available: SSH as root with the key, then
  *          `opnsense-shell password` (console menu option 3).
  * Never logs a password: /var/log/oic-firstboot.log only records the steps.
@@ -151,7 +151,11 @@ function random_password(int $len): string
     return $p;
 }
 
-/* encrypt for `nova get-password` (RSA PKCS#1 v1.5, base64) and store it */
+/*
+ * encrypt for `nova get-password` (RSA PKCS#1 v1.5, base64), then store it
+ * from a detached process that waits for the metadata service: it may only
+ * answer once DHCP completes, after this syshook.
+ */
 function nova_store_password(string $password, array $keys): string
 {
     $rsa = null;
@@ -164,22 +168,19 @@ function nova_store_password(string $password, array $keys): string
     if ($rsa === null) {
         return 'skipped (no RSA key: nova get-password needs one)';
     }
-    $dir = sys_get_temp_dir() . '/oic-pw-' . bin2hex(random_bytes(4));
+    $dir = '/var/tmp/oic-pw-' . bin2hex(random_bytes(4));
     mkdir($dir, 0700);
     file_put_contents("$dir/key.pub", $rsa . "\n");
     file_put_contents("$dir/pw", $password);
     $ok = run("ssh-keygen -e -m PKCS8 -f $dir/key.pub > $dir/key.pem")
         && run("openssl pkeyutl -encrypt -pubin -inkey $dir/key.pem -in $dir/pw | openssl base64 -A > $dir/pw.enc");
-    $code = '';
-    if ($ok) {
-        run(sprintf('curl -sS -m 10 -o /dev/null -w "%%{http_code}" -X POST --data-binary @%s %s',
-            "$dir/pw.enc", escapeshellarg(OIC_MD . '/openstack/latest/password')), $code);
-    }
-    run('/bin/rm -rf ' . escapeshellarg($dir));
+    @unlink("$dir/pw");
     if (!$ok) {
+        run('/bin/rm -rf ' . escapeshellarg($dir));
         return 'failed (could not encrypt with the RSA key: ssh-keygen or openssl failed)';
     }
-    return $code === '200' ? 'stored for nova get-password' : "not stored (metadata service answered $code)";
+    run('/usr/sbin/daemon -f /bin/sh /usr/local/opnsense/scripts/oic/nova-password.sh ' . escapeshellarg($dir));
+    return 'storing for nova get-password in the background';
 }
 
 /* ---------------------------------------------------------------------- */
@@ -188,7 +189,6 @@ $done = is_file(OIC_DONE) ? trim((string)file_get_contents(OIC_DONE)) : '';
 $source = null;
 $meta = [];
 $ud = '';
-$md_reachable = false;
 
 if (($d = read_drive('config-2', ['meta' => 'openstack/latest/meta_data.json', 'ud' => 'openstack/latest/user_data'])) !== null) {
     $source = 'config drive';
@@ -202,11 +202,10 @@ if (($d = read_drive('config-2', ['meta' => 'openstack/latest/meta_data.json', '
     ];
     $ud = $d['ud'];
 }
-/* the metadata service: source when there is no drive, and the place for the password */
-$md_meta = md_get('/openstack/latest/meta_data.json', $source === null && $done === '' ? 24 : 2);
-if ($md_meta !== null && $md_meta !== '') {
-    $md_reachable = true;
-    if ($source === null) {
+/* the metadata service: source when there is no drive */
+if ($source === null) {
+    $md_meta = md_get('/openstack/latest/meta_data.json', $done === '' ? 24 : 2);
+    if ($md_meta !== null && $md_meta !== '') {
         $source = 'metadata service';
         $meta = json_decode($md_meta, true) ?: [];
         $ud = (string)md_get('/openstack/latest/user_data', 3);
@@ -278,7 +277,8 @@ system_hostname_configure();
 system_resolver_configure();
 
 if ($generated !== null) {
-    $nova = $md_reachable ? nova_store_password($generated, $keys) : 'skipped (no metadata service)';
+    /* no metadata service behind a NoCloud drive (Proxmox) */
+    $nova = $source === 'NoCloud drive' ? 'skipped (NoCloud drive, no metadata service)' : nova_store_password($generated, $keys);
     logm("generated password: console, $nova");
     $bar = str_repeat('=', 64);
     console("\n$bar\nopenimages.cloud: OPNsense web GUI and console login\n" .
