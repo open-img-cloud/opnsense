@@ -53,10 +53,24 @@ bunzip2 "$work/$IMG.bz2"
 openssl dgst -sha256 -verify "$KEY" -signature "$work/$IMG.sig.bin" "$work/$IMG"
 echo "[build] signature of $IMG verified"
 
+# --- Grow the image so the in-place upgrade has room -------------------------
+# The nano image root is sized for a CF card, not for applying a newer base +
+# kernel on top: opnsense-update -bk fills it (26.7.10 overflowed the 3 GB
+# image). Grow the file, the BSD partition and the UFS before mounting. The
+# published image is re-expanded to the real disk on first boot (the
+# .probe.for.growfs marker below), so this only affects the build host.
+GROW_GB="${OPNSENSE_IMG_GB:-6}"
+echo "[build] growing image to ${GROW_GB} GB for the upgrade"
+truncate -s "${GROW_GB}G" "$work/$IMG"
+
 # --- Mount the image ---------------------------------------------------------
 md=$(mdconfig -a -t vnode -f "$work/$IMG")
+gpart recover "$md" || true
+gpart resize -i 1 "$md"
 fsck_ufs -y "/dev/${md}a" >/dev/null 2>&1 || true
+growfs -y "/dev/${md}a"
 mount "/dev/${md}a" "$mnt"
+df -h "$mnt" | sed 's/^/[build] /'
 mount -t devfs devfs "$mnt/dev"
 cp /etc/resolv.conf "$mnt/etc/resolv.conf"
 
